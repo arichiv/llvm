@@ -35,6 +35,11 @@ using namespace llvm;
 // FIXME: completely move here.
 extern cl::opt<bool> ForceStackAlign;
 
+// Command line option for control stack (EECS 583)
+cl::opt<bool> EnableControlStackContinue("control-stack-continue", cl::desc("Enable separate control stack and cause continues (EECS 583)"));
+cl::opt<bool> EnableControlStackExit("control-stack-exit", cl::desc("Enable separate control stack and cause exits (EECS 583)"));
+cl::opt<bool> EnableControlStackThrow("control-stack-throw", cl::desc("Enable separate control stack and cause throws (EECS 583)"));
+
 bool X86FrameLowering::hasReservedCallFrame(const MachineFunction &MF) const {
   return !MF.getFrameInfo()->hasVarSizedObjects();
 }
@@ -652,6 +657,37 @@ void X86FrameLowering::emitPrologue(MachineFunction &MF) const {
   unsigned StackPtr = RegInfo->getStackRegister();
   DebugLoc DL;
 
+  // EECS 583
+  if(EnableControlStackContinue || EnableControlStackExit || EnableControlStackThrow) {
+
+    // Now, actually grab the return address and store it into R11 (caller-saved, should be safe)
+    addRegOffset(BuildMI(MBB, MBBI, DL, TII.get(X86::MOV64rm), X86::R11), X86::RSP, true, 0);
+
+    // Check if we're main, and if so allocate the control stack, and set the control register  
+    if(Fn->getName() == "main") {
+      // Copy EDI/RSI to safe reg
+      BuildMI(MBB, MBBI, DL, TII.get(X86::MOV64rr), X86::R14).addReg(X86::RDI);
+      BuildMI(MBB, MBBI, DL, TII.get(X86::MOV64rr), X86::R15).addReg(X86::RSI);
+      // Copy 2048 to EDI
+      BuildMI(MBB, MBBI, DL, TII.get(X86::MOV32ri), X86::EDI).addImm(1024*1024);
+      // Call malloc
+      BuildMI(MBB, MBBI, DL, TII.get(X86::CALL64pcrel32)).addExternalSymbol("malloc");
+      // Move result into control register
+      BuildMI(MBB, MBBI, DL, TII.get(X86::MOV64rr), RegInfo->getControlRegister()).addReg(X86::RAX);
+      // Copy EDI/RSI back from safe reg
+      BuildMI(MBB, MBBI, DL, TII.get(X86::MOV64rr), X86::RDI).addReg(X86::R14);
+      BuildMI(MBB, MBBI, DL, TII.get(X86::MOV64rr), X86::RSI).addReg(X86::R15);
+    }
+
+    // Now, move the return address into our control stack
+    addRegOffset(BuildMI(MBB, MBBI, DL, TII.get(X86::MOV64mr)), RegInfo->getControlRegister(), true, 0).addReg(X86::R11);  
+    
+    // Increment CSP
+    BuildMI(MBB, MBBI, DL, TII.get(X86::ADD64ri32), RegInfo->getControlRegister()).addReg(RegInfo->getControlRegister()).addImm(8);
+  }
+
+
+ 
   // If we're forcing a stack realignment we can't rely on just the frame
   // info, we need to know the ABI stack alignment as well in case we
   // have a call out.  Otherwise just make sure we have some alignment - we'll
@@ -982,7 +1018,7 @@ void X86FrameLowering::emitEpilogue(MachineFunction &MF,
   uint64_t MaxAlign  = MFI->getMaxAlignment();
   unsigned CSSize = X86FI->getCalleeSavedFrameSize();
   uint64_t NumBytes = 0;
-
+ 
   // If we're forcing a stack realignment we can't rely on just the frame
   // info, we need to know the ABI stack alignment as well in case we
   // have a call out.  Otherwise just make sure we have some alignment - we'll
@@ -1139,6 +1175,43 @@ void X86FrameLowering::emitEpilogue(MachineFunction &MF,
     delta += mergeSPUpdates(MBB, MBBI, StackPtr, true);
     emitSPUpdate(MBB, MBBI, StackPtr, delta, Is64Bit, UseLEA, TII, *RegInfo);
   }
+
+  // EECS 583
+  // Go to the end (past callee-restored registers and whatnot)
+  MBBI = MBB.getLastNonDebugInstr();
+  if(EnableControlStackContinue || EnableControlStackExit || EnableControlStackThrow) {
+    
+    // Decrement CSP before moving from control stack to register
+    BuildMI(MBB, MBBI, DL, TII.get(X86::SUB64ri32), RegInfo->getControlRegister()).addReg(RegInfo->getControlRegister()).addImm(8);
+
+    // Instead of just storing it back, let's actually compare
+    addRegOffset(BuildMI(MBB, MBBI, DL, TII.get(X86::MOV64rm), X86::R11), RegInfo->getControlRegister(), true, 0); 
+    addRegOffset(BuildMI(MBB, MBBI, DL, TII.get(X86::MOV64rm), X86::R10), RegInfo->getStackRegister(), true, 0);
+    BuildMI(MBB, MBBI, DL, TII.get(X86::CMP64rr)).addReg(X86::R10).addReg(X86::R11);
+    MCSymbol *label = MF.getMMI().getContext().CreateTempSymbol();
+    BuildMI(MBB, MBBI, DL, TII.get(X86::JE_1)).addSym(label);
+
+    if(MF.getFunction()->getName() != "main") {
+      if (EnableControlStackContinue) {
+        addRegOffset(BuildMI(MBB, MBBI, DL, TII.get(X86::MOV64mr)), RegInfo->getStackRegister(), true, 0).addReg(X86::R11);
+      } else if (EnableControlStackExit) {
+        BuildMI(MBB, MBBI, DL, TII.get(X86::MOV32ri), X86::EDI).addImm(1337);
+        BuildMI(MBB, MBBI, DL, TII.get(X86::CALL64pcrel32)).addExternalSymbol("exit", 0);
+      } else if (EnableControlStackThrow) {
+        BuildMI(MBB, MBBI, DL, TII.get(X86::MOV32ri), X86::EDI).addImm(4);
+        BuildMI(MBB, MBBI, DL, TII.get(X86::CALL64pcrel32)).addExternalSymbol("__cxa_allocate_exception", 0);
+        addRegOffset(BuildMI(MBB, MBBI, DL, TII.get(X86::MOV32mi)), X86::RAX, true, 0).addImm(1337);  
+        BuildMI(MBB, MBBI, DL, TII.get(X86::MOV64rr), X86::RDI).addReg(X86::RAX);
+        BuildMI(MBB, MBBI, DL, TII.get(X86::MOV32ri), X86::ESI).addExternalSymbol("_ZTIi", 0);
+        BuildMI(MBB, MBBI, DL, TII.get(X86::XOR32rr), X86::EDX).addReg(X86::EDX).addReg(X86::EDX);
+        BuildMI(MBB, MBBI, DL, TII.get(X86::CALL64pcrel32)).addExternalSymbol("__cxa_throw", 0);
+      }
+    }
+
+    //insert label
+    BuildMI(MBB, MBBI, DL, TII.get(X86::EH_LABEL)).addSym(label);
+  }
+
 }
 
 int X86FrameLowering::getFrameIndexOffset(const MachineFunction &MF, int FI) const {

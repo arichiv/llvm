@@ -68,6 +68,7 @@ X86RegisterInfo::X86RegisterInfo(X86TargetMachine &tm,
     SlotSize = 8;
     StackPtr = X86::RSP;
     FramePtr = X86::RBP;
+    ControlPtr = X86::R13; // EECS 583: Store control pointer to class loc
   } else {
     SlotSize = 4;
     StackPtr = X86::ESP;
@@ -277,6 +278,12 @@ BitVector X86RegisterInfo::getReservedRegs(const MachineFunction &MF) const {
   Reserved.set(X86::EIP);
   Reserved.set(X86::IP);
 
+  // EECS 583: Reserve Control Pointers
+  Reserved.set(X86::R13);
+  Reserved.set(X86::R13D);
+  Reserved.set(X86::R13W);
+  Reserved.set(X86::R13B);
+
   // Set the frame-pointer register and its aliases as reserved if needed.
   if (TFI->hasFP(MF)) {
     Reserved.set(X86::RBP);
@@ -306,7 +313,7 @@ BitVector X86RegisterInfo::getReservedRegs(const MachineFunction &MF) const {
       // R8, R9, ...
       static const uint16_t GPR64[] = {
         X86::R8,  X86::R9,  X86::R10, X86::R11,
-        X86::R12, X86::R13, X86::R14, X86::R15
+        X86::R12, /* X86::R13, EECS 583: This will always be reserved now */ X86::R14, X86::R15
       };
       for (const uint16_t *AI = getOverlaps(GPR64[n]); unsigned Reg = *AI; ++AI)
         Reserved.set(Reg);

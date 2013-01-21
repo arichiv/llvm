@@ -340,6 +340,10 @@ void X86MCInstLower::Lower(const MachineInstr *MI, MCInst &OutMI) const {
     case MachineOperand::MO_RegisterMask:
       // Ignore call clobbers.
       continue;
+    case MachineOperand::MO_MCSymbol:
+      MCOp = MCOperand::CreateExpr(MCSymbolRefExpr::Create(
+                       MO.getMCSymbol(), Ctx));
+      break;
     }
     
     OutMI.addOperand(MCOp);

@@ -50,6 +50,10 @@ private:
   ///
   unsigned FramePtr;
 
+  /// EECS 583: ControlPtr - X86 physical register used as frame ptr.
+  ///
+  unsigned ControlPtr;
+
 public:
   X86RegisterInfo(X86TargetMachine &tm, const TargetInstrInfo &tii);
 
@@ -121,6 +125,7 @@ public:
   // Debug information queries.
   unsigned getFrameRegister(const MachineFunction &MF) const;
   unsigned getStackRegister() const { return StackPtr; }
+  unsigned getControlRegister() const { return ControlPtr; } // EECS 583: Get Control Register
   // FIXME: Move to FrameInfok
   unsigned getSlotSize() const { return SlotSize; }
 
